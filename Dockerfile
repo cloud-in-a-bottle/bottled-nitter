@@ -7,10 +7,10 @@
 # Auth: no SSO proxy needed — the OpenHost router's zone_auth
 # cookie gates all access. Nitter has no user accounts.
 #
-# Uses the sekai-soft fork which supports guest accounts and
-# authenticated Twitter sessions.
+# Uses the sekai-soft/nitter-pitchforked fork which supports both
+# OAuth tokens and cookie-based (ct0/auth_token) sessions.
 
-FROM ghcr.io/sekai-soft/nitter:master AS nitter-src
+FROM ghcr.io/sekai-soft/nitter-pitchforked:latest AS nitter-src
 
 FROM docker.io/library/alpine:3.20
 
@@ -25,7 +25,7 @@ RUN apk add --no-cache \
     libcrypto3
 
 # Copy the nitter binary and static assets from the upstream image.
-# The sekai-soft image has them at /src/.
+# The pitchforked image has them at /src/.
 COPY --from=nitter-src /src/nitter /opt/nitter/nitter
 COPY --from=nitter-src /src/public /opt/nitter/public
 

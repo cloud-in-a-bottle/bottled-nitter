@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# start.sh — OpenHost supervisor for Nitter.
+# start.sh — OpenHost supervisor for Nitter (pitchforked).
 #
 # Manages two processes inside one container:
 #   1. Redis   (127.0.0.1:6379, in-memory cache)
@@ -38,20 +38,42 @@ fi
 
 # ---------------------------------------------------------------------------
 # 3. Sessions file (user provides Twitter cookies here)
+#
+# The pitchforked fork reads a JSONL file (one JSON object per line).
+# Each line is either an OAuth session:
+#   {"oauthToken": "...", "oauthTokenSecret": "..."}
+# or a cookie session (browser cookies):
+#   {"kind": "cookie", "authToken": "<auth_token>", "ct0": "<ct0>"}
+#
+# Migrate from the old guest_accounts.jsonl name if present.
 # ---------------------------------------------------------------------------
-SESSIONS_FILE="${APP_DATA}/guest_accounts.jsonl"
-if [ ! -f "$SESSIONS_FILE" ]; then
+SESSIONS_FILE="${APP_DATA}/sessions.jsonl"
+OLD_SESSIONS_FILE="${APP_DATA}/guest_accounts.jsonl"
+
+# Migrate old file name if new one doesn't exist yet
+if [ ! -f "$SESSIONS_FILE" ] && [ -f "$OLD_SESSIONS_FILE" ] && [ -s "$OLD_SESSIONS_FILE" ]; then
+    echo "[start.sh] Migrating guest_accounts.jsonl -> sessions.jsonl"
+    mv "$OLD_SESSIONS_FILE" "$SESSIONS_FILE"
+fi
+
+if [ ! -f "$SESSIONS_FILE" ] || [ ! -s "$SESSIONS_FILE" ]; then
     cat > "$SESSIONS_FILE" <<'EOF'
 EOF
     echo "[start.sh] WARNING: No Twitter session tokens found."
-    echo "[start.sh] Create guest_accounts.jsonl in the app data directory"
-    echo "[start.sh] with one JSON object per line, e.g.:"
-    echo '[start.sh]   {"ct0": "<csrf_token>", "auth_token": "<auth_token>"}'
+    echo "[start.sh] Create sessions.jsonl in the app data directory"
+    echo "[start.sh] with one JSON object per line."
+    echo "[start.sh]"
+    echo "[start.sh] Cookie session (from browser dev-tools):"
+    echo '[start.sh]   {"kind": "cookie", "authToken": "<auth_token>", "ct0": "<ct0>"}'
+    echo "[start.sh]"
+    echo "[start.sh] OAuth session:"
+    echo '[start.sh]   {"oauthToken": "<token>", "oauthTokenSecret": "<secret>"}'
+    echo "[start.sh]"
     echo "[start.sh] Upload via file-browser or SFTP."
 fi
 
-# Symlink sessions file into the nitter working directory
-ln -sf "$SESSIONS_FILE" "${NITTER_WORK}/guest_accounts.jsonl"
+# Tell nitter where the sessions file lives
+export NITTER_SESSIONS_FILE="$SESSIONS_FILE"
 
 # ---------------------------------------------------------------------------
 # 4. Generate nitter.conf
@@ -91,7 +113,7 @@ enableRSS = true
 enableDebug = false
 proxy = ""
 proxyAuth = ""
-tokenCount = 10
+maxConcurrentReqs = 2
 
 [Preferences]
 theme = "Nitter"
