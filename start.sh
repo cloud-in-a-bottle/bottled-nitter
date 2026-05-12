@@ -33,6 +33,7 @@ if [ -f "$HMAC_KEY_FILE" ]; then
 else
     HMAC_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
     printf '%s' "$HMAC_KEY" > "$HMAC_KEY_FILE"
+    chmod 600 "$HMAC_KEY_FILE"
 fi
 
 # ---------------------------------------------------------------------------
@@ -138,6 +139,22 @@ echo "[start.sh] Starting Nitter on 0.0.0.0:8080..."
 cd "${NITTER_WORK}"
 ./nitter &
 NITTER_PID=$!
+
+# Wait for Nitter to start accepting connections
+for i in $(seq 1 30); do
+    if curl -sf -o /dev/null http://127.0.0.1:8080/ 2>/dev/null; then
+        echo "[start.sh] Nitter is ready."
+        break
+    fi
+    if ! kill -0 "$NITTER_PID" 2>/dev/null; then
+        echo "[start.sh] ERROR: Nitter process exited during startup."
+        exit 1
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "[start.sh] WARNING: Nitter did not respond within 15s, continuing anyway."
+    fi
+    sleep 0.5
+done
 
 echo "[start.sh] All processes running (Redis=$REDIS_PID, Nitter=$NITTER_PID)"
 

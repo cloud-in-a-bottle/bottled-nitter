@@ -12,7 +12,7 @@
 
 FROM ghcr.io/sekai-soft/nitter:master AS nitter-src
 
-FROM docker.io/library/alpine:3.18
+FROM docker.io/library/alpine:3.20
 
 RUN apk add --no-cache \
     bash \
@@ -21,7 +21,8 @@ RUN apk add --no-cache \
     curl \
     ca-certificates \
     pcre \
-    openssl1.1-compat
+    libssl3 \
+    libcrypto3
 
 # Copy the nitter binary and static assets from the upstream image.
 # The sekai-soft image has them at /src/.
