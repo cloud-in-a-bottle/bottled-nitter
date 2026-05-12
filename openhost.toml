@@ -1,0 +1,19 @@
+[app]
+name = "nitter"
+version = "0.1.0"
+description = "Nitter — privacy-respecting Twitter/X frontend. Requires session tokens for API access. Owner-only."
+authors = ["Andrew Laack <andrew@laack.co>"]
+
+[runtime.container]
+image = "Dockerfile"
+port = 8080
+
+[routing]
+health_check = "/"
+
+[resources]
+memory_mb = 512
+cpu_millicores = 250
+
+[data]
+app_data = true
