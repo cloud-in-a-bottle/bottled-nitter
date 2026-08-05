@@ -128,7 +128,92 @@ NITTERCFG
 echo "[start.sh] Generated nitter.conf (hostname=${NITTER_HOSTNAME})"
 
 # ---------------------------------------------------------------------------
-# 5. Start Redis
+# 5. Helpers: session detection + placeholder web server
+# ---------------------------------------------------------------------------
+#
+# The prebuilt nitter binary SIGSEGVs (nil-session dereference) the moment it
+# makes a Twitter API call with no usable session loaded. With an empty or
+# all-expired sessions file that happens within seconds of startup, and the
+# old supervisor exited on the crash — so the container was recreated and
+# crashed again, forever (a restart storm).
+#
+# To avoid that, we only launch nitter when the sessions file looks usable,
+# and we keep a tiny placeholder server answering :8080 (so the OpenHost
+# health check on "/" passes and the container stays stable) whenever nitter
+# can't run. nitter auto-starts within ~10s of a usable sessions file
+# appearing.
+
+# A session file is "usable" if it has at least one line carrying a session
+# credential key. Cheap structural check (no jq): it does NOT prove the tokens
+# still work with Twitter, only that the file is worth handing to nitter.
+has_usable_sessions() {
+    [ -s "$SESSIONS_FILE" ] || return 1
+    grep -qE '"(authToken|oauthToken)"[[:space:]]*:' "$SESSIONS_FILE"
+}
+
+sessions_mtime() {
+    stat -c %Y "$SESSIONS_FILE" 2>/dev/null || echo 0
+}
+
+PLACEHOLDER_PID=""
+start_placeholder() {
+    # Already running? Leave it.
+    if [ -n "$PLACEHOLDER_PID" ] && kill -0 "$PLACEHOLDER_PID" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p /tmp/placeholder
+    cat > /tmp/placeholder/index.html <<'HTML'
+<!doctype html>
+<title>Nitter — waiting for session tokens</title>
+<body style="font-family:system-ui,sans-serif;max-width:40em;margin:4em auto;padding:0 1em;line-height:1.5">
+<h1>Nitter is waiting for Twitter/X session tokens</h1>
+<p>Nitter cannot serve tweets without at least one valid session, and the
+prebuilt binary crashes if it tries. To avoid a crash-loop, this placeholder
+is running instead.</p>
+<p>Add one JSON object per line to
+<code>/data/app_data/nitter/sessions.jsonl</code> — for example a browser-cookie
+session:</p>
+<pre>{"kind": "cookie", "authToken": "&lt;auth_token&gt;", "ct0": "&lt;ct0&gt;"}</pre>
+<p>Nitter starts automatically within ~10&nbsp;seconds of the file being
+updated with a usable session.</p>
+</body>
+HTML
+    # busybox httpd stays listening on :8080 and serves index.html for "/",
+    # so the health check passes. Run foreground, backgrounded by the script
+    # so we get a stable PID to manage.
+    busybox-extras httpd -f -p 8080 -h /tmp/placeholder &
+    PLACEHOLDER_PID=$!
+    echo "[start.sh] Placeholder web server running on :8080 (PID=$PLACEHOLDER_PID)."
+}
+stop_placeholder() {
+    if [ -n "$PLACEHOLDER_PID" ] && kill -0 "$PLACEHOLDER_PID" 2>/dev/null; then
+        kill "$PLACEHOLDER_PID" 2>/dev/null || true
+        wait "$PLACEHOLDER_PID" 2>/dev/null || true
+    fi
+    PLACEHOLDER_PID=""
+}
+
+# Serve the placeholder and block until the operator writes a usable session
+# file. We require the mtime to CHANGE since we started waiting, so a
+# crash-loop caused by *expired* tokens (file already "usable"-looking) waits
+# for a real update instead of instantly relaunching into another segfault.
+wait_for_sessions() {
+    local baseline
+    baseline="$(sessions_mtime)"
+    start_placeholder
+    echo "[start.sh] Waiting for a usable sessions.jsonl (polling every 10s)..."
+    while true; do
+        sleep 10
+        if [ "$(sessions_mtime)" != "$baseline" ] && has_usable_sessions; then
+            echo "[start.sh] Detected updated sessions.jsonl with a usable session."
+            stop_placeholder
+            return 0
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# 6. Start Redis
 # ---------------------------------------------------------------------------
 echo "[start.sh] Starting Redis..."
 redis-server \
@@ -155,45 +240,71 @@ for i in $(seq 1 30); do
 done
 
 # ---------------------------------------------------------------------------
-# 6. Start Nitter
+# 7. Cleanup trap
 # ---------------------------------------------------------------------------
-echo "[start.sh] Starting Nitter on 0.0.0.0:8080..."
-cd "${NITTER_WORK}"
-./nitter &
-NITTER_PID=$!
-
-# Wait for Nitter to start accepting connections
-for i in $(seq 1 30); do
-    if curl -sf -o /dev/null http://127.0.0.1:8080/ 2>/dev/null; then
-        echo "[start.sh] Nitter is ready."
-        break
-    fi
-    if ! kill -0 "$NITTER_PID" 2>/dev/null; then
-        echo "[start.sh] ERROR: Nitter process exited during startup."
-        exit 1
-    fi
-    if [ "$i" -eq 30 ]; then
-        echo "[start.sh] WARNING: Nitter did not respond within 15s, continuing anyway."
-    fi
-    sleep 0.5
-done
-
-echo "[start.sh] All processes running (Redis=$REDIS_PID, Nitter=$NITTER_PID)"
-
-# ---------------------------------------------------------------------------
-# 7. Supervise — if any process exits, tear down and exit
-# ---------------------------------------------------------------------------
+NITTER_PID=""
 cleanup() {
     echo "[start.sh] Shutting down..."
-    kill "$NITTER_PID" "$REDIS_PID" 2>/dev/null || true
-    wait
+    kill "$NITTER_PID" "$PLACEHOLDER_PID" "$REDIS_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
 }
 trap cleanup EXIT SIGTERM SIGINT
 
-set +e
-wait -n "$REDIS_PID" "$NITTER_PID"
-EXIT_CODE=$?
-set -e
+# ---------------------------------------------------------------------------
+# 8. Supervise Nitter with a crash-loop breaker
+#
+# Launch nitter only when there is a usable session file. If nitter keeps
+# dying quickly (the segfault-on-nil-session signature of no/expired tokens),
+# stop relaunching and fall back to the placeholder until the operator updates
+# sessions.jsonl. Redis dying is treated as fatal. The container never exits
+# on a nitter crash, so OpenHost never restart-storms it, and :8080 always
+# answers the health check.
+# ---------------------------------------------------------------------------
+HEALTHY_UPTIME=60      # seconds nitter must survive to NOT count as a fast crash
+MAX_RAPID_CRASHES=3    # consecutive fast crashes before falling back to placeholder
+rapid_crashes=0
 
-echo "[start.sh] Child exited (code=$EXIT_CODE). Shutting down."
-exit "$EXIT_CODE"
+while true; do
+    if ! has_usable_sessions; then
+        echo "[start.sh] No usable Twitter sessions in ${SESSIONS_FILE}."
+        wait_for_sessions
+        rapid_crashes=0
+    fi
+
+    echo "[start.sh] Starting Nitter on 0.0.0.0:8080..."
+    ( cd "${NITTER_WORK}" && exec ./nitter ) &
+    NITTER_PID=$!
+    started_at="$(date +%s)"
+    echo "[start.sh] Nitter running (Redis=$REDIS_PID, Nitter=$NITTER_PID)."
+
+    set +e
+    wait -n "$REDIS_PID" "$NITTER_PID"
+    set -e
+
+    # Redis dying is fatal — no cache, no reason to stay up; let OpenHost recreate us.
+    if ! kill -0 "$REDIS_PID" 2>/dev/null; then
+        echo "[start.sh] ERROR: Redis exited. Shutting down."
+        exit 1
+    fi
+
+    # Otherwise nitter is what exited.
+    uptime=$(( $(date +%s) - started_at ))
+    NITTER_PID=""
+    echo "[start.sh] Nitter exited after ${uptime}s."
+
+    if [ "$uptime" -lt "$HEALTHY_UPTIME" ]; then
+        rapid_crashes=$(( rapid_crashes + 1 ))
+    else
+        rapid_crashes=0
+    fi
+
+    if [ "$rapid_crashes" -ge "$MAX_RAPID_CRASHES" ]; then
+        echo "[start.sh] Nitter crashed ${rapid_crashes}x quickly — likely no valid sessions."
+        echo "[start.sh] Serving placeholder until sessions.jsonl is updated."
+        wait_for_sessions
+        rapid_crashes=0
+    else
+        echo "[start.sh] Restarting Nitter (rapid_crashes=${rapid_crashes}/${MAX_RAPID_CRASHES})."
+        sleep 2
+    fi
+done
