@@ -72,8 +72,11 @@ EOF
     echo "[start.sh] Upload via file-browser or SFTP."
 fi
 
-# Tell nitter where the sessions file lives
+# Tell nitter where the sessions file lives. Also export SESSIONS_FILE so the
+# placeholder's token-entry CGI (a child of this script via busybox httpd) knows
+# where to append sessions.
 export NITTER_SESSIONS_FILE="$SESSIONS_FILE"
+export SESSIONS_FILE
 
 # ---------------------------------------------------------------------------
 # 4. Generate nitter.conf
@@ -161,29 +164,134 @@ start_placeholder() {
     if [ -n "$PLACEHOLDER_PID" ] && kill -0 "$PLACEHOLDER_PID" 2>/dev/null; then
         return 0
     fi
-    mkdir -p /tmp/placeholder
+    mkdir -p /tmp/placeholder/cgi-bin
+
+    # The landing page is an owner-only form for pasting Twitter/X session
+    # tokens. The whole app sits behind the OpenHost owner SSO, so only the
+    # space owner can reach this. Submitting posts to the CGI below, which
+    # appends the session to sessions.jsonl; wait_for_sessions() then picks it
+    # up and launches nitter.
     cat > /tmp/placeholder/index.html <<'HTML'
 <!doctype html>
-<title>Nitter — waiting for session tokens</title>
-<body style="font-family:system-ui,sans-serif;max-width:40em;margin:4em auto;padding:0 1em;line-height:1.5">
-<h1>Nitter is waiting for Twitter/X session tokens</h1>
-<p>Nitter cannot serve tweets without at least one valid session, and the
-prebuilt binary crashes if it tries. To avoid a crash-loop, this placeholder
-is running instead.</p>
-<p>Add one JSON object per line to
-<code>/data/app_data/nitter/sessions.jsonl</code> — for example a browser-cookie
-session:</p>
-<pre>{"kind": "cookie", "authToken": "&lt;auth_token&gt;", "ct0": "&lt;ct0&gt;"}</pre>
-<p>Nitter starts automatically within ~10&nbsp;seconds of the file being
-updated with a usable session.</p>
-</body>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nitter — add session tokens</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:44em;margin:3em auto;padding:0 1.2em;line-height:1.55;color:#222;background:#fafafa}
+  h1{font-size:1.4rem} code,pre{background:#eee;border-radius:4px;padding:.1em .35em;font-size:.9em}
+  pre{padding:.7em;overflow:auto} label{display:block;margin:.9em 0 .25em;font-weight:600}
+  input[type=text],textarea{width:100%;box-sizing:border-box;padding:.55em;border:1px solid #bbb;border-radius:6px;font-family:ui-monospace,monospace;font-size:.95em}
+  button{margin-top:1.1em;padding:.6em 1.3em;border:0;border-radius:6px;background:#1d9bf0;color:#fff;font-size:1rem;cursor:pointer}
+  .muted{color:#666;font-size:.9em} details{margin-top:1.4em} summary{cursor:pointer;font-weight:600}
+  .card{background:#fff;border:1px solid #e3e3e3;border-radius:10px;padding:1.4em 1.6em}
+</style></head>
+<body>
+<div class="card">
+<h1>Nitter needs a Twitter/X session</h1>
+<p>Nitter can't load tweets without at least one valid session. Add one below —
+Nitter starts automatically within ~15&nbsp;seconds. This page is only reachable
+by you (the space owner).</p>
+
+<form method="post" action="/cgi-bin/save">
+  <label for="authToken">auth_token cookie</label>
+  <input id="authToken" name="authToken" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. a1b2c3… (40 hex chars)">
+  <label for="ct0">ct0 cookie</label>
+  <input id="ct0" name="ct0" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. 9f8e7d… (long hex string)">
+  <button type="submit">Save &amp; start Nitter</button>
+</form>
+
+<p class="muted">Get these from a logged-in X.com browser tab: DevTools →
+Application → Cookies → <code>https://x.com</code> → copy the
+<code>auth_token</code> and <code>ct0</code> values. Use a throwaway account.</p>
+
+<details>
+  <summary>Advanced: paste raw sessions JSONL</summary>
+  <form method="post" action="/cgi-bin/save">
+    <p class="muted">One JSON object per line. Cookie or OAuth sessions:</p>
+    <pre>{"kind":"cookie","authToken":"…","ct0":"…"}
+{"oauthToken":"…","oauthTokenSecret":"…"}</pre>
+    <textarea name="raw" rows="5" spellcheck="false" placeholder='{"kind":"cookie","authToken":"…","ct0":"…"}'></textarea>
+    <button type="submit">Append lines &amp; start Nitter</button>
+  </form>
+</details>
+</div>
+</body></html>
 HTML
-    # busybox httpd stays listening on :8080 and serves index.html for "/",
-    # so the health check passes. Run foreground, backgrounded by the script
-    # so we get a stable PID to manage.
+
+    # CGI handler: validate + append submitted session(s) to sessions.jsonl.
+    # SESSIONS_FILE is inherited from start.sh's exported env (with a fallback).
+    cat > /tmp/placeholder/cgi-bin/save <<'CGI'
+#!/bin/sh
+SESSIONS_FILE="${SESSIONS_FILE:-/data/app_data/nitter/sessions.jsonl}"
+
+printf 'Content-Type: text/html\r\n\r\n'
+
+fail() {
+    printf '<!doctype html><meta charset=utf-8><title>Error</title><body style="font-family:system-ui;max-width:40em;margin:3em auto"><h1>Could not save</h1><p>%s</p><p><a href="/">&larr; Back</a></p>' "$1"
+    exit 0
+}
+
+[ "$REQUEST_METHOD" = "POST" ] || fail "Please use the form."
+
+body=$(head -c "${CONTENT_LENGTH:-0}")
+
+# urldecode: +->space, %XX->byte
+urldec() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+# first value for a form key
+field() { printf '%s' "$body" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1; }
+
+tmp=$(mktemp)
+added=0
+
+raw=$(field raw)
+if [ -n "$raw" ]; then
+    # Advanced path: accept only lines that look like a JSON object carrying a
+    # session credential key. Lenient by design — has_usable_sessions and the
+    # crash-breaker are the real safety net if a line is subtly malformed.
+    # `|| [ -n "$line" ]` so a final line with no trailing newline isn't dropped.
+    urldec "$raw" | tr -d '\r' | while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        case "$line" in
+            \{*\}) : ;;
+            *) continue ;;
+        esac
+        case "$line" in
+            *'"authToken"'*|*'"oauthToken"'*) printf '%s\n' "$line" >> "$tmp" ;;
+        esac
+    done
+    added=$(grep -c . "$tmp" 2>/dev/null || echo 0)
+else
+    # Simple path: a cookie session from two fields. Strict character check so
+    # the values can be safely embedded in JSON with no escaping or injection.
+    authToken=$(urldec "$(field authToken)")
+    ct0=$(urldec "$(field ct0)")
+    okchars() { case "$1" in *[!A-Za-z0-9_-]*|"") return 1;; esac; return 0; }
+    okchars "$authToken" || fail "auth_token is missing or has unexpected characters."
+    okchars "$ct0" || fail "ct0 is missing or has unexpected characters."
+    printf '{"kind":"cookie","authToken":"%s","ct0":"%s"}\n' "$authToken" "$ct0" >> "$tmp"
+    added=1
+fi
+
+[ "$added" -ge 1 ] || fail "No usable session found in what you submitted."
+
+# Make sure the existing file ends with a newline before we append.
+if [ -s "$SESSIONS_FILE" ] && [ "$(tail -c1 "$SESSIONS_FILE" 2>/dev/null | wc -l)" -eq 0 ]; then
+    printf '\n' >> "$SESSIONS_FILE"
+fi
+cat "$tmp" >> "$SESSIONS_FILE"
+rm -f "$tmp"
+chmod 600 "$SESSIONS_FILE" 2>/dev/null || true
+
+printf '<!doctype html><meta charset=utf-8><meta http-equiv="refresh" content="15;url=/"><title>Saved</title><body style="font-family:system-ui;max-width:40em;margin:3em auto"><h1>Saved %s session(s)</h1><p>Nitter is starting &mdash; this page reloads in ~15&nbsp;seconds.</p><p><a href="/">Reload now</a></p>' "$added"
+CGI
+    chmod +x /tmp/placeholder/cgi-bin/save
+
+    # busybox httpd stays listening on :8080, serves index.html for "/" (so the
+    # health check passes) and runs the cgi-bin/ handler for POSTs. Run
+    # foreground, backgrounded by the script so we get a stable PID to manage.
     busybox-extras httpd -f -p 8080 -h /tmp/placeholder &
     PLACEHOLDER_PID=$!
-    echo "[start.sh] Placeholder web server running on :8080 (PID=$PLACEHOLDER_PID)."
+    echo "[start.sh] Placeholder web server running on :8080 (PID=$PLACEHOLDER_PID) — token-entry form available."
 }
 stop_placeholder() {
     if [ -n "$PLACEHOLDER_PID" ] && kill -0 "$PLACEHOLDER_PID" 2>/dev/null; then

@@ -10,23 +10,26 @@ No SSO. All access is gated behind OpenHost zone_auth. No public paths.
 
 ## Setup
 
-After deploying, you must provide Twitter/X session tokens for Nitter to function.
+After deploying, you must provide at least one Twitter/X session token for Nitter to function. The prebuilt binary crashes on any API call when it has no usable session, so until one is provided the app serves a token-entry page instead of crash-looping (see "Crash resilience" below).
 
-### guest_accounts.jsonl
+### Option A — the token-entry page (easiest)
 
-Nitter needs a `guest_accounts.jsonl` file containing Twitter API session tokens. Without it, Nitter will start but fail to load any tweets.
+While Nitter has no usable session, opening the app in a browser shows a small form (owner-only, since the whole app is behind OpenHost SSO). Paste the `auth_token` and `ct0` cookies from a logged-in X.com tab (DevTools → Application → Cookies → `https://x.com`) and submit. Nitter starts automatically within ~15 seconds. The form also has an "Advanced" box for pasting raw `sessions.jsonl` lines (cookie or OAuth).
 
-1. Generate session tokens following the [sekai-soft/nitter wiki](https://github.com/sekai-soft/nitter/wiki).
-2. Upload `guest_accounts.jsonl` to the app's data directory via file-browser or SFTP.
-   - The file goes in: `/data/app_data/nitter/guest_accounts.jsonl`
-3. Restart the app (or it will pick up the file on next restart).
+### Option B — upload the file directly
 
-### Example guest_accounts.jsonl format
+Write one JSON object per line to `/data/app_data/nitter/sessions.jsonl` via file-browser or SFTP. `start.sh` picks up a usable file within ~10 seconds and launches Nitter.
 
 ```jsonl
-{"oauth_token":"...","oauth_token_secret":"..."}
-{"oauth_token":"...","oauth_token_secret":"..."}
+{"kind": "cookie", "authToken": "<auth_token>", "ct0": "<ct0>"}
+{"oauthToken": "<token>", "oauthTokenSecret": "<secret>"}
 ```
+
+Use a throwaway account — these are full account credentials.
+
+### Crash resilience
+
+Sessions expire. When they do, Nitter segfaults on its next API call; `start.sh` detects the rapid crashes, stops relaunching, and falls back to the token-entry page so the container stays stable instead of restart-looping. Enter fresh tokens on that page (or update the file) and Nitter restarts automatically.
 
 ## Architecture
 
