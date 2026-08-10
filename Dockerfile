@@ -22,7 +22,8 @@ RUN apk add --no-cache \
     ca-certificates \
     pcre \
     libssl3 \
-    libcrypto3
+    libcrypto3 \
+    busybox-extras
 
 # Copy the nitter binary and static assets from the upstream image.
 # The pitchforked image has them at /src/.
