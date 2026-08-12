@@ -1,12 +1,12 @@
-# openhost-nitter
+# bottled-nitter
 
-Nitter (privacy-respecting Twitter/X frontend) packaged for OpenHost.
+Nitter (privacy-respecting Twitter/X frontend) packaged for Cloud in a Bottle.
 
 Uses the [sekai-soft/nitter](https://github.com/sekai-soft/nitter) fork which supports guest accounts and authenticated sessions.
 
 ## Auth Model
 
-No SSO. All access is gated behind OpenHost zone_auth. No public paths.
+No SSO. All access is gated behind Cloud in a Bottle zone_auth. No public paths.
 
 ## Setup
 
@@ -14,7 +14,7 @@ After deploying, you must provide at least one Twitter/X session token for Nitte
 
 ### Option A — the token-entry page (easiest)
 
-While Nitter has no usable session, opening the app in a browser shows a small form (owner-only, since the whole app is behind OpenHost SSO). Paste the `auth_token` and `ct0` cookies from a logged-in X.com tab (DevTools → Application → Cookies → `https://x.com`) and submit. Nitter starts automatically within ~15 seconds. The form also has an "Advanced" box for pasting raw `sessions.jsonl` lines (cookie or OAuth).
+While Nitter has no usable session, opening the app in a browser shows a small form (owner-only, since the whole app is behind Cloud in a Bottle SSO). Paste the `auth_token` and `ct0` cookies from a logged-in X.com tab (DevTools → Application → Cookies → `https://x.com`) and submit. Nitter starts automatically within ~15 seconds. The form also has an "Advanced" box for pasting raw `sessions.jsonl` lines (cookie or OAuth).
 
 ### Option B — upload the file directly
 
@@ -35,7 +35,7 @@ Sessions expire. When they do, Nitter segfaults on its next API call; `start.sh`
 
 - Alpine base with Redis (for caching) and the Nitter binary copied from the upstream Docker image
 - Redis runs in-process (no persistence, cache only)
-- start.sh generates nitter.conf from OpenHost environment variables
+- start.sh generates nitter.conf from Cloud in a Bottle environment variables
 - HMAC key is generated once and persisted in app_data
 - Listens on port 8080
 
