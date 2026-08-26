@@ -2,6 +2,8 @@
 
 Nitter (privacy-respecting Twitter/X frontend) packaged for Cloud in a Bottle.
 
+<img width="1111" height="801" alt="Screenshot 2026-08-25 at 4 06 09 PM" src="https://github.com/user-attachments/assets/02892fde-e261-4c53-8d3f-70da6ca73422" />
+
 Uses the [sekai-soft/nitter](https://github.com/sekai-soft/nitter) fork which supports guest accounts and authenticated sessions.
 
 ## Auth Model
